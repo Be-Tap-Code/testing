@@ -177,17 +177,17 @@ async def search_frames(request: SearchRequest, top_k: int = 500):
         indices = indices[0]
         frames = []
         for i, idx in enumerate(indices):
-            if idx < 0 or idx >= len(image_paths_from_db):
-                continue
+            # if idx < 0 or idx >= len(image_paths_from_db):
+            #     continue
             image_path = image_paths_from_db[idx]
             filename = os.path.basename(image_path)
             folder_name = os.path.basename(os.path.dirname(image_path))
             file_path = os.path.join(FRAME_FOLDER, folder_name, filename)
-            if not os.path.exists(file_path):
-                continue
+            # if not os.path.exists(file_path):
+            #     continue
             meta_row = df_meta[df_meta['image_path'] == image_path]
-            if meta_row.empty:
-                continue
+            # if meta_row.empty:
+            #     continue
             video_id = meta_row.iloc[0]['video_name'] if 'video_name' in meta_row.columns else ''
             frame_number = int(meta_row.iloc[0]['frame_number']) if 'frame_number' in meta_row.columns else 0
             frames.append(FrameData(
@@ -210,15 +210,20 @@ async def root():
 
 @app.get("/api/status")
 async def get_status():
-    """Get API status and BEIT3 model status"""
+    """Get API status and model status"""
     status = {
         "api": "running",
-        "beit3": {
-            "model_loaded": beit3_model is not None,
-            "tokenizer_loaded": beit3_tokenizer is not None,
+        "clip": {
+            "model_loaded": clip_model is not None,
+            "processor_loaded": clip_processor is not None,
+            "device": DEVICE,
             "metadata_loaded": df_meta is not None,
-            "metadata_rows": len(df_meta) if df_meta is not None else 0,
-            "metadata_mappings": len(beit3_metadata_mapping) if beit3_metadata_mapping else 0
+            "metadata_rows": len(df_meta) if df_meta is not None else 0
+        },
+        "elasticsearch": {
+            "ocr_index": OCR_INDEX,
+            "audio_index": ELASTIC_AUDIO_INDEX,
+            "connected": es is not None
         }
     }
     return status
@@ -493,7 +498,7 @@ async def filter_frames(request: FrameFilterRequest):
 # --- CẤU HÌNH ELASTICSEARCH ---
 ELASTIC_CLOUD_URL = "https://my-elasticsearch-project-cf1442.es.us-east-1.aws.elastic.cloud:443"
 ELASTIC_API_KEY = "cTdNYW5KZ0JpUGhEQ3ItZmdSc2Q6RWRTbHloajF1MGRxTDNVU2txZlZMdw==" # Thay bằng API Key của bạn
-OCR_INDEX = "ocr_l27_fuzzy"  # Đổi tên index cho đúng
+OCR_INDEX = "ocr_batch1"  # Đổi tên index cho đúng
 es = Elasticsearch(
     ELASTIC_CLOUD_URL,
     api_key=ELASTIC_API_KEY,
@@ -525,7 +530,7 @@ async def search_ocr(request: OCRSearchRequest):
                     "match": {
                         "ocr_entries.text": {
                             "query": request.text,
-                            "minimum_should_match": "20%"
+                            "minimum_should_match": "5%"
                         }
                     }
                 },
@@ -533,8 +538,9 @@ async def search_ocr(request: OCRSearchRequest):
             }
         }
     }
+
     try:
-        res = es.search(index=OCR_INDEX, body=search_query, size=100)
+        res = es.search(index=OCR_INDEX, body=search_query, size=500)
         frames = []
         for idx, hit in enumerate(res["hits"]["hits"]):
             source = hit["_source"]
@@ -547,6 +553,9 @@ async def search_ocr(request: OCRSearchRequest):
             duration = ""
             vidInfo = ""
             timestamp = ""
+            width = 0
+            height = 0
+            fps = 0.0
             # Lấy text khớp nhất từ inner_hits
             matched_entry = None
             if "inner_hits" in hit and "ocr_entries" in hit["inner_hits"]:
@@ -559,44 +568,68 @@ async def search_ocr(request: OCRSearchRequest):
                 parts = image_path.split('/')
                 if len(parts) == 2:
                     folder, filename = parts
-                    # Parse filename to get info
-                    parsed = None
-                    try:
-                        parsed = parse_filename(filename)
-                    except Exception:
-                        parsed = None
-                    if parsed:
-                        video_id = parsed.get("video_id", "")
-                        frame_number = int(parsed.get("frame_number", 0))
-                        title = parsed.get("title", "")
-                        duration = parsed.get("duration", "")
-                        vidInfo = parsed.get("vidInfo", "")
-                        timestamp = parsed.get("timestamp", "")
-                    # Nếu có metadata thì bổ sung width/height
-                    width = 0
-                    height = 0
+                    # Ưu tiên lấy metadata từ DF_META
                     if DF_META is not None:
                         try:
                             meta_row = DF_META.loc[image_path]
+                            video_id = meta_row['video_name'] if 'video_name' in meta_row else ""
+                            frame_number = int(meta_row['frame_number']) if 'frame_number' in meta_row else 0
                             width = int(meta_row['width']) if 'width' in meta_row else 0
                             height = int(meta_row['height']) if 'height' in meta_row else 0
+                            fps = float(meta_row['fps']) if 'fps' in meta_row else 0.0
+                            # Tính timestamp từ frame_number và fps nếu có
+                            if fps > 0:
+                                seconds = frame_number / fps
+                                timestamp = f"{int(seconds//3600):02d}:{int((seconds%3600)//60):02d}:{int(seconds%60):02d}"
+                                duration = timestamp
+                            else:
+                                timestamp = ""
+                                duration = ""
+                            title = f"{video_id} - Frame {frame_number} - {timestamp}"
+                            vidInfo = f"*vid: {video_id} - {frame_number} frames @ {fps}fps"
                         except KeyError:
-                            # image_path không có trong metadata
-                            pass
-                    frames.append(FrameData(
-                        id=f"ocr-search-{idx+1}",
-                        filename=filename,
-                        video_id=video_id,
-                        frame_number=frame_number,
-                        image_url=f"/api/frames/{folder}/{filename}",
-                        title=title,
-                        duration=duration,
-                        vidInfo=f"OCR: {matched_text} | {vidInfo}",
-                        timestamp=timestamp,
-                        width=width,
-                        height=height,
-                        fps=0.0
-                    ))
+                            # image_path không có trong metadata, fallback parse filename
+                            parsed = None
+                            try:
+                                parsed = parse_filename(filename)
+                            except Exception:
+                                parsed = None
+                            if parsed:
+                                video_id = parsed.get("video_id", "")
+                                frame_number = int(parsed.get("frame_number", 0))
+                                title = parsed.get("title", "")
+                                duration = parsed.get("duration", "")
+                                vidInfo = parsed.get("vidInfo", "")
+                                timestamp = parsed.get("timestamp", "")
+                    else:
+                        # Không có DF_META, fallback parse filename
+                        parsed = None
+                        try:
+                            parsed = parse_filename(filename)
+                        except Exception:
+                            parsed = None
+                        if parsed:
+                            video_id = parsed.get("video_id", "")
+                            frame_number = int(parsed.get("frame_number", 0))
+                            title = parsed.get("title", "")
+                            duration = parsed.get("duration", "")
+                            vidInfo = parsed.get("vidInfo", "")
+                            timestamp = parsed.get("timestamp", "")
+                image_url = f"/api/frames/{folder}/{filename}" if folder and filename else ""
+                frames.append(FrameData(
+                    id=f"ocr-search-{idx+1}",
+                    filename=filename,
+                    video_id=video_id,
+                    frame_number=frame_number,
+                    image_url=image_url,
+                    title=title,
+                    duration=duration,
+                    vidInfo=f"OCR: {matched_text} | {vidInfo}",
+                    timestamp=timestamp,
+                    width=width,
+                    height=height,
+                    fps=fps
+                ))
         return frames
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1049,7 +1082,7 @@ async def search_audio(request: AudioSearchRequest):
     METADATA_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "image_metadata.csv"))
     df_meta = pd.read_csv(METADATA_PATH)
     try:
-        res = es.search(index=ELASTIC_AUDIO_INDEX, body=search_query)
+        res = es.search(index=ELASTIC_AUDIO_INDEX, body=search_query, size=200)
         frames = []
         for idx, hit in enumerate(res["hits"]["hits"]):
             source = hit["_source"]
