@@ -15,12 +15,18 @@ import os
 import logging
 from elasticsearch import Elasticsearch
 
+os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+
 logging.getLogger("uvicorn.access").disabled = True
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
-
+# Thiết lập cache cho HuggingFace về /data/cndt_hangdv/AIC
+os.environ["HF_HOME"] = "/data/cndt_hangdv/AIC"
+os.environ["TRANSFORMERS_CACHE"] = "/data/cndt_hangdv/AIC/huggingface_cache"
+os.environ["HF_DATASETS_CACHE"] = "/data/cndt_hangdv/AIC/huggingface_datasets"
+os.environ["HF_METRICS_CACHE"] = "/data/cndt_hangdv/AIC/huggingface_metrics"
 # Force using GPU 5 (which has more free memory)
-os.environ["CUDA_VISIBLE_DEVICES"] = "5"
+os.environ["CUDA_VISIBLE_DEVICES"] = "7"
 clip_model = None
 clip_processor = None
 milvus_client = None
@@ -1043,11 +1049,45 @@ async def search_ocr(request: OCRSearchRequest):
 #         traceback.print_exc()
 #         raise HTTPException(status_code=500, detail=str(e))
 # --- CẤU HÌNH ELASTICSEARCH AUDIO ---
+@app.get("/api/nearest-frame-link")
+async def get_nearest_frame_link(video_id: str, frame_id: int):
+    """
+    Trả về link frame gần nhất với frame_id cho video_id.
+    """
+    try:
+        # Đọc metadata
+        METADATA_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "image_metadata.csv"))
+        df_meta = pd.read_csv(METADATA_PATH)
+
+        # Lọc các frame thuộc video_id
+        meta_rows = df_meta[df_meta['video_name'] == video_id]
+        if meta_rows.empty:
+            raise HTTPException(status_code=404, detail=f"Không tìm thấy metadata cho video_id: {video_id}")
+
+        # Tìm frame gần nhất với frame_id
+        meta_rows = meta_rows.copy()
+        meta_rows['frame_number'] = meta_rows['frame_number'].astype(int)
+        meta_rows['diff'] = (meta_rows['frame_number'] - int(frame_id)).abs()
+        nearest_row = meta_rows.loc[meta_rows['diff'].idxmin()]
+
+        filename_real = os.path.basename(nearest_row['image_path'])
+        folder = video_id
+        image_url = f"/api/frames/{folder}/{filename_real}"
+        nearest_frame_number = int(nearest_row['frame_number'])
+
+        return {
+            "video_id": video_id,
+            "requested_frame_id": frame_id,
+            "nearest_frame_number": nearest_frame_number,
+            "image_url": image_url
+        }
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 ELASTIC_AUDIO_INDEX = "asr_batch1"
 
 class AudioSearchRequest(BaseModel):
     text: str
-    size: int = 10
+    size: int = 100
 
 @app.post("/api/search-audio")
 async def search_audio(request: AudioSearchRequest):
@@ -1088,26 +1128,22 @@ async def search_audio(request: AudioSearchRequest):
             source = hit["_source"]
             video_path = source.get("video_path", "")
             start_time_str = source.get("start_time", "0")
-            end_time_str = source.get("end_time", "0")
             transcript = source.get("transcript", "")
-            # Lấy highlight nếu có
             highlight = ""
             if "highlight" in hit and "transcript" in hit["highlight"]:
                 highlight = " ... ".join(hit["highlight"]["transcript"])
-            # Parse video_id from video_path
             filename = os.path.basename(video_path)
             video_id = filename.split(".")[0] if filename else ""
-            # Parse start_time to seconds
             seconds = parse_time_to_seconds(start_time_str)
-            # Get fps from metadata
             meta_row = df_meta[df_meta['video_name'] == video_id]
-            fps = float(meta_row.iloc[0]['fps']) if not meta_row.empty and 'fps' in meta_row.columns else 25.0
+            if meta_row.empty:
+                # Log lỗi hoặc trả về thông báo rõ ràng
+                print(f"Không tìm thấy metadata cho video_id: {video_id}")
+                continue
+            fps = float(meta_row.iloc[0]['fps']) if 'fps' in meta_row.columns and not pd.isnull(meta_row.iloc[0]['fps']) else 25.0
             frame_number = int(seconds * fps)
-            # Build frame image filename
-            # Tìm frame gần nhất trong metadata
             meta_video = df_meta[df_meta['video_name'] == video_id]
             if not meta_video.empty:
-                # Tìm frame_number gần nhất
                 meta_video['frame_number'] = meta_video['frame_number'].astype(int)
                 meta_video['diff'] = (meta_video['frame_number'] - frame_number).abs()
                 nearest_row = meta_video.loc[meta_video['diff'].idxmin()]
@@ -1123,7 +1159,6 @@ async def search_audio(request: AudioSearchRequest):
                 width = 0
                 height = 0
                 image_url = f"/api/frames/{folder}/{filename_real}"
-            # Title/duration
             title = f"{video_id} - ASR @ {start_time_str}"
             duration = start_time_str
             vidInfo = f"ASR: {transcript}"
@@ -1146,6 +1181,8 @@ async def search_audio(request: AudioSearchRequest):
         return frames
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+    
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=True)

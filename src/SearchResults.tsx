@@ -1,5 +1,8 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import { CONFIG, API_ENDPOINTS } from './config';
+  import React, { useCallback, useEffect, useMemo, useState } from 'react';
+  import { CONFIG, API_ENDPOINTS } from './config';
+
+  // ============== NEAREST FRAME SEARCH ==============
+
 
 interface FrameData {
   id: string;
@@ -25,10 +28,40 @@ const buildImageUrlFromPath = (image_path: string) =>
   ensureLeadingSlash(`/api/frames/image/${image_path}`);
 
 // Thêm 'youtube' vào SearchMode
-type SearchMode = 'random' | 'text' | 'beit3' | 'ocr' | 'audio' | 'youtube';
+type SearchMode = 'random' | 'text'  | 'ocr' | 'audio' | 'youtube';
 type Orientation = 'All' | 'Ngang' | 'Dọc' | 'Khác';
 
 const SearchResults: React.FC = () => {
+  const searchNearestFrame = useCallback(async (videoId: string, frameId: number) => {
+    try {
+      setLoading(true);
+      setError(null);
+      setSearchStatus('Searching nearest frame...');
+      const url = `${CONFIG.API_BASE_URL}/api/nearest-frame-link?video_id=${encodeURIComponent(videoId)}&frame_id=${frameId}`;
+      const res = await fetch(url);
+      if (!res.ok) throw new Error(`GET /api/nearest-frame-link -> ${res.status}`);
+      const data = await res.json();
+
+      // Build frame data
+      const frame: FrameData = {
+        id: `nearest-${data.video_id}-${data.nearest_frame_number}`,
+        filename: `${data.video_id}_${String(data.nearest_frame_number).padStart(8, '0')}.webp`,
+        video_id: data.video_id,
+        frame_number: data.nearest_frame_number,
+        image_url: data.image_url ?? `/api/frames/${data.video_id}/${String(data.nearest_frame_number).padStart(8, '0')}.webp`,
+        title: `Nearest frame to ${data.requested_frame_id}`,
+        timestamp: String(data.nearest_frame_number),
+      };
+      setFrames([frame]);
+      setAllFrames([frame]);
+      setSearchStatus(`Found nearest frame: #${data.nearest_frame_number} for requested #${data.requested_frame_id}`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to search nearest frame');
+      setSearchStatus('Nearest frame search failed.');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
   const [frames, setFrames] = useState<FrameData[]>([]);
   const [allFrames, setAllFrames] = useState<FrameData[]>([]); // Store original frames for filtering
   const [loading, setLoading] = useState(false);
@@ -97,30 +130,6 @@ const SearchResults: React.FC = () => {
     }
   }, []);
 
-  const searchByBeit3 = useCallback(async (query: string) => {
-    try {
-      setLoading(true);
-      setError(null);
-      setSearchStatus('Searching with BEiT3 ...');
-      const url = `${CONFIG.API_BASE_URL}${API_ENDPOINTS.SEARCH_BEIT3}`;
-      const res = await fetch(url, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ query, top_k: CONFIG.DEFAULT_FRAME_LIMIT }),
-      });
-      if (!res.ok) throw new Error(`POST ${API_ENDPOINTS.SEARCH_BEIT3} -> ${res.status}`);
-      const data: FrameData[] = await res.json();
-      setAllFrames(data);
-      setFrames(data);
-      setSearchStatus(`Found ${data.length} frame(s)`);
-      setRetryCount(0);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Failed to search frames (BEiT3)';
-      setError(msg);
-      setSearchStatus('BEiT3 search failed.');
-    } finally {
-      setLoading(false);
-    }
-  }, []);
 
   // Helper dùng chung cho normalize
   const normalizeToFrameData = (arr: any[]): FrameData[] => {
@@ -172,6 +181,68 @@ const SearchResults: React.FC = () => {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           youtube_url: youtubeUrl,
+          seconds: Number(youtubeSeconds),
+        }),
+      });
+      if (!res.ok) throw new Error(`POST /api/search-frame-id -> ${res.status}`);
+      const data = await res.json();
+
+      // Call /api/youtube-link for actual frame
+      const actualLinkRes = await fetch(`${CONFIG.API_BASE_URL}/api/youtube-link?video_id=${data.video_id_metadata}&frame_number=${data.actual_frame_number}`);
+      const actualLink = actualLinkRes.ok ? await actualLinkRes.json() : {};
+
+      // Call /api/youtube-link for requested frame
+      const requestedLinkRes = await fetch(`${CONFIG.API_BASE_URL}/api/youtube-link?video_id=${data.video_id_metadata}&frame_number=${data.requested_frame_number}`);
+      const requestedLink = requestedLinkRes.ok ? await requestedLinkRes.json() : {};
+
+      const framesRaw = [
+        {
+          id: `yt-${data.video_id}-${data.actual_frame_number}`,
+          filename: `${data.video_id_metadata}_${String(data.actual_frame_number).padStart(8, '0')}.webp`,
+          video_id: data.video_id_metadata,
+          frame_number: data.actual_frame_number,
+          image_url: actualLink.image_url ?? `/api/frames/${data.video_id_metadata}/${String(data.actual_frame_number).padStart(8, '0')}.webp`,
+          title: `YouTube @ ${data.actual_seconds}s (actual)`,
+          fps: data.fps,
+          timestamp: String(data.actual_seconds),
+          youtube_url: actualLink.youtube_url ?? '',
+        },
+        {
+          id: `yt-${data.video_id}-${data.requested_frame_number}`,
+          filename: `${data.video_id_metadata}_${String(data.requested_frame_number).padStart(8, '0')}.webp`,
+          video_id: data.video_id_metadata,
+          frame_number: data.requested_frame_number,
+          image_url: requestedLink.image_url ?? `/api/frames/${data.video_id_metadata}/${String(data.requested_frame_number).padStart(8, '0')}.webp`,
+          title: `YouTube @ ${data.requested_seconds}s (requested)`,
+          fps: data.fps,
+          timestamp: String(data.requested_seconds),
+          youtube_url: requestedLink.youtube_url ?? '',
+        }
+      ];
+      console.log(framesRaw)
+      const normalized = normalizeToFrameData(framesRaw);
+      setFrames(normalized);
+      setAllFrames(normalized);
+      setSearchStatus(`Found actual frame at ${data.actual_seconds}s, requested frame at ${data.requested_seconds}s`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to search frame by YouTube');
+      setSearchStatus('YouTube search failed.');
+    } finally {
+      setLoading(false);
+    }
+  }, [youtubeUrl, youtubeSeconds]);
+
+  const searchByVideoID = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError(null);
+      setSearchStatus('Searching frame by Video ID...');
+      const url = `${CONFIG.API_BASE_URL}/api/search-frame-id`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          video_id: youtubeUrl,
           seconds: Number(youtubeSeconds),
         }),
       });
@@ -412,7 +483,6 @@ const SearchResults: React.FC = () => {
     }
 
     if (mode === 'text') return void searchByText(searchText);
-    if (mode === 'beit3') return void searchByBeit3(searchText);
     if (mode === 'ocr') return void searchByOCR(searchText);
     if (mode === 'audio') return void searchByAudio(searchText);
   };
@@ -450,7 +520,6 @@ const SearchResults: React.FC = () => {
               >
                 <option value="random">Random (/api/frames)</option>
                 <option value="text">Text (CLIP)</option>
-                <option value="beit3">Text (BEiT3)</option>
                 <option value="ocr">OCR</option>
                 <option value="audio">Audio</option>
                 <option value="youtube">YouTube (URL + seconds)</option>
@@ -594,47 +663,60 @@ const SearchResults: React.FC = () => {
                   </button>
                 </div>
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
-                  {list.map(frame => (
-                    <div
-                      key={frame.id}
-                      className="bg-white rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 cursor-pointer"
-                      onClick={() => openYouTubeAtTimestamp(frame)}
-                      title="Open on YouTube at this exact moment"
-                      role="button"
-                    >
-                      <div className="aspect-video bg-gray-300 rounded-t-lg relative overflow-hidden">
-                        <img
-                          src={`${CONFIG.API_BASE_URL}${frame.image_url}`}
-                          alt={frame.filename}
-                          className="w-full h-full object-cover"
-                          loading="lazy"
-                          onError={(e) => {
-                            const target = e.target as HTMLImageElement;
-                            target.style.display = 'none';
-                            const fallback = target.parentElement?.querySelector('.fallback-icon') as HTMLElement;
-                            if (fallback) fallback.setAttribute('style', 'display:flex');
-                          }}
-                        />
-                        <div className="fallback-icon absolute inset-0 bg-gradient-to-br from-gray-200 to-gray-400 items-center justify-center hidden">
-                          <svg className="w-12 h-12 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
-                                  d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2z" />
-                          </svg>
+                  {list.map((frame, frameIdx) => {
+                    // For youtube mode, show which is actual/requested
+                    let youtubeLabel = '';
+                    if (mode === 'youtube') {
+                      if (frameIdx === 0) youtubeLabel = 'Actual Frame';
+                      if (frameIdx === 1) youtubeLabel = 'Requested Frame';
+                    }
+                    return (
+                      <div
+                        key={frame.id}
+                        className="bg-white rounded-lg shadow-sm hover:shadow-md transition-shadow duration-200 cursor-pointer"
+                        onClick={() => openYouTubeAtTimestamp(frame)}
+                        title="Open on YouTube at this exact moment"
+                        role="button"
+                      >
+                        <div className="aspect-video bg-gray-300 rounded-t-lg relative overflow-hidden">
+                          <img
+                            src={`${CONFIG.API_BASE_URL}${frame.image_url}`}
+                            alt={frame.filename}
+                            className="w-full h-full object-cover"
+                            loading="lazy"
+                            onError={(e) => {
+                              const target = e.target as HTMLImageElement;
+                              target.style.display = 'none';
+                              const fallback = target.parentElement?.querySelector('.fallback-icon') as HTMLElement;
+                              if (fallback) fallback.setAttribute('style', 'display:flex');
+                            }}
+                          />
+                          <div className="fallback-icon absolute inset-0 bg-gradient-to-br from-gray-200 to-gray-400 items-center justify-center hidden">
+                            <svg className="w-12 h-12 text-gray-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+                                    d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2z" />
+                            </svg>
+                          </div>
+                          <div className="absolute bottom-2 right-2 bg-black bg-opacity-75 text-white text-xs px-1 py-0.5 rounded">
+                            #{frame.frame_number}
+                          </div>
+                          {mode === 'youtube' && youtubeLabel && (
+                            <div className="absolute top-2 left-2 bg-blue-600 bg-opacity-80 text-white text-xs px-2 py-0.5 rounded shadow">
+                              {youtubeLabel}
+                            </div>
+                          )}
                         </div>
-                        <div className="absolute bottom-2 right-2 bg-black bg-opacity-75 text-white text-xs px-1 py-0.5 rounded">
-                          #{frame.frame_number}
+                        <div className="p-3">
+                          <h3 className="text-sm font-medium text-gray-900 truncate mb-1" title={frame.filename}>
+                            {frame.filename}
+                          </h3>
+                          <p className="text-xs text-gray-400 mt-1">
+                            Frame: {frame.frame_number}
+                          </p>
                         </div>
                       </div>
-                      <div className="p-3">
-                        <h3 className="text-sm font-medium text-gray-900 truncate mb-1" title={frame.filename}>
-                          {frame.filename}
-                        </h3>
-                        <p className="text-xs text-gray-400 mt-1">
-                          Frame: {frame.frame_number}
-                        </p>
-                      </div>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </section>
             ))}
