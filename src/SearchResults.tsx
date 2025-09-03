@@ -28,7 +28,7 @@ const buildImageUrlFromPath = (image_path: string) =>
   ensureLeadingSlash(`/api/frames/image/${image_path}`);
 
 // Thêm 'youtube' vào SearchMode
-type SearchMode = 'random' | 'text'  | 'ocr' | 'audio' | 'youtube';
+type SearchMode = 'random' | 'text'  | 'ocr' | 'audio' | 'youtube'| 'video_frame';
 type Orientation = 'All' | 'Ngang' | 'Dọc' | 'Khác';
 
 const SearchResults: React.FC = () => {
@@ -70,6 +70,8 @@ const SearchResults: React.FC = () => {
 
   // YouTube inputs
   const [youtubeUrl, setYoutubeUrl] = useState('');
+  const [videoId, setVideoId] = useState('');
+  const [frameId, setFrameId] = useState('');
   const [youtubeSeconds, setYoutubeSeconds] = useState('');
 
   const [mode, setMode] = useState<SearchMode>('random');
@@ -232,29 +234,30 @@ const SearchResults: React.FC = () => {
     }
   }, [youtubeUrl, youtubeSeconds]);
 
+
   const searchByVideoID = useCallback(async () => {
     try {
       setLoading(true);
       setError(null);
       setSearchStatus('Searching frame by Video ID...');
-      const url = `${CONFIG.API_BASE_URL}/api/search-frame-id`;
+      const url = `${CONFIG.API_BASE_URL}/api/nearest-frame-link`;
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          video_id: youtubeUrl,
-          seconds: Number(youtubeSeconds),
+          video_id: videoId,
+          frame_id: Number(frameId),
         }),
       });
-      if (!res.ok) throw new Error(`POST /api/search-frame-id -> ${res.status}`);
+      if (!res.ok) throw new Error(`POST /api/nearest-frame-link -> ${res.status}`);
       const data = await res.json();
 
       // Call /api/youtube-link for actual frame
-      const actualLinkRes = await fetch(`${CONFIG.API_BASE_URL}/api/youtube-link?video_id=${data.video_id_metadata}&frame_number=${data.actual_frame_number}`);
+      const actualLinkRes = await fetch(`${CONFIG.API_BASE_URL}/api/youtube-link?video_id=${videoId}&frame_number=${data.nearest_frame_number}`);
       const actualLink = actualLinkRes.ok ? await actualLinkRes.json() : {};
 
       // Call /api/youtube-link for requested frame
-      const requestedLinkRes = await fetch(`${CONFIG.API_BASE_URL}/api/youtube-link?video_id=${data.video_id_metadata}&frame_number=${data.requested_frame_number}`);
+      const requestedLinkRes = await fetch(`${CONFIG.API_BASE_URL}/api/youtube-link?video_id=${data.video_id_metadata}&frame_number=${data.requested_frame_id}`);
       const requestedLink = requestedLinkRes.ok ? await requestedLinkRes.json() : {};
 
       const framesRaw = [
@@ -264,7 +267,7 @@ const SearchResults: React.FC = () => {
           video_id: data.video_id_metadata,
           frame_number: data.actual_frame_number,
           image_url: actualLink.image_url ?? `/api/frames/${data.video_id_metadata}/${String(data.actual_frame_number).padStart(8, '0')}.webp`,
-          title: `YouTube @ ${data.actual_seconds}s (actual)`,
+          title: `YouTube @ ${data.actual_seconds}s (nearest)`,
           fps: data.fps,
           timestamp: String(data.actual_seconds),
           youtube_url: actualLink.youtube_url ?? '',
@@ -475,6 +478,15 @@ const SearchResults: React.FC = () => {
       }
       return void searchByYouTube();
     }
+    if (mode === 'video_frame') {
+      if (!videoId.trim() || frameId.trim() === '' || isNaN(Number(frameId) )){
+        setFrames([]);
+        setSearchStatus('Please enter YouTube URL and valid seconds.');
+        return;
+      }
+      return void searchByVideoID();
+    }
+
 
     if (!searchText.trim()) {
       setFrames([]);
@@ -523,6 +535,7 @@ const SearchResults: React.FC = () => {
                 <option value="ocr">OCR</option>
                 <option value="audio">Audio</option>
                 <option value="youtube">YouTube (URL + seconds)</option>
+                <option value="video_frame">Video Frame</option>
               </select>
 
               {mode === 'youtube' ? (
@@ -542,7 +555,24 @@ const SearchResults: React.FC = () => {
                     className="col-span-2 px-3 py-2 border rounded-md text-sm"
                   />
                 </>
-              ) : (
+              ) : mode === 'video_frame' ? (
+                  <>
+                    <input
+                      type="text"
+                      value={videoId}
+                      onChange={e => setVideoId(e.target.value)}
+                      placeholder="Video ID (metadata)"
+                      className="col-span-5 px-3 py-2 border rounded-md text-sm"
+                    />
+                    <input
+                      type="number"
+                      value={frameId}
+                      onChange={e => setFrameId(e.target.value)}
+                      placeholder="Frame number"
+                      className="col-span-2 px-3 py-2 border rounded-md text-sm"
+                    />
+                  </>
+                ): (
                 <div className="col-span-7 relative">
                   <input
                     type="text"
