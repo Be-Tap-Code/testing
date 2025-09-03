@@ -21,12 +21,12 @@ logging.getLogger("uvicorn.access").disabled = True
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 # Thiết lập cache cho HuggingFace về /data/cndt_hangdv/AIC
-# os.environ["HF_HOME"] = "/data/cndt_hangdv/AIC"
-# os.environ["TRANSFORMERS_CACHE"] = "/data/cndt_hangdv/AIC/huggingface_cache"
-# os.environ["HF_DATASETS_CACHE"] = "/data/cndt_hangdv/AIC/huggingface_datasets"
-# os.environ["HF_METRICS_CACHE"] = "/data/cndt_hangdv/AIC/huggingface_metrics"
+os.environ["HF_HOME"] = "/data/cndt_hangdv/AIC"
+os.environ["TRANSFORMERS_CACHE"] = "/data/cndt_hangdv/AIC/huggingface_cache"
+os.environ["HF_DATASETS_CACHE"] = "/data/cndt_hangdv/AIC/huggingface_datasets"
+os.environ["HF_METRICS_CACHE"] = "/data/cndt_hangdv/AIC/huggingface_metrics"
 # Force using GPU 5 (which has more free memory)
-# os.environ["CUDA_VISIBLE_DEVICES"] = "7"
+os.environ["CUDA_VISIBLE_DEVICES"] = "7"
 clip_model = None
 clip_processor = None
 milvus_client = None
