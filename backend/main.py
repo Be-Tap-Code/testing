@@ -60,8 +60,27 @@ try:
     faiss_index = faiss.read_index(FAISS_INDEX_PATH)
     df_meta = pd.read_csv(METADATA_PATH)
     image_paths_from_db = df_meta['image_path'].tolist()
+    
+    # Tạo dictionary lookup để tối ưu hóa hiệu suất tìm kiếm metadata
+    meta_dict = df_meta.set_index("image_path").to_dict(orient="index")
+    print(f"✅ Metadata dictionary created with {len(meta_dict)} entries")
+    
+    # Tạo fps_dict: mỗi video chỉ giữ fps duy nhất (first value)
+    fps_dict = df_meta.groupby("video_name")["fps"].first().to_dict()
+    print(f"✅ FPS dictionary created with {len(fps_dict)} videos")
+    
+    # Tạo frames_dict: map video_id -> {frame_number -> image_path}
+    frames_dict = (
+        df_meta.groupby("video_name")
+        .apply(lambda g: g.set_index("frame_number")["image_path"].to_dict())
+        .to_dict()
+    )
+    print(f"✅ Frames dictionary created with {len(frames_dict)} videos")
 except Exception as e:
     print(f"❌ Error initializing model or FAISS/metadata: {e}")
+    meta_dict = None
+    fps_dict = None
+    frames_dict = None
 # Model cho response
 class FrameData(BaseModel):
     id: str
@@ -83,16 +102,16 @@ def parse_filename(filename: str) -> Dict:
     Parse filename theo format: Video-id_frame_hh:mm:ss.ms_ms
     Ví dụ: L03_V001_006000_00-04-00.000_240000.webp
     """
-    print(f"🔍 Parsing filename: {filename}")
+    # print(f"🔍 Parsing filename: {filename}")
     
     try:
         # Loại bỏ extension .webp
         name_without_ext = filename.replace('.webp', '')
-        print(f"   📝 Name without extension: {name_without_ext}")
+        # print(f"   📝 Name without extension: {name_without_ext}")
         
         # Split theo underscore
         parts = name_without_ext.split('_')
-        print(f"   🔪 Split parts: {parts} (length: {len(parts)})")
+        # print(f"   🔪 Split parts: {parts} (length: {len(parts)})")
         
         if len(parts) >= 5:
             level = parts[0]  # L03
@@ -101,56 +120,33 @@ def parse_filename(filename: str) -> Dict:
             timestamp = parts[3]  # 00-04-00.000
             milliseconds = parts[4]  # 240000
             
-            print(f"   📊 Parsed components:")
-            print(f"      - Level: {level}")
-            print(f"      - Video ID: {video_id}")
-            print(f"      - Frame Number: {frame_number}")
-            try:
-                name_without_ext = filename.replace('.webp', '')
-                parts = name_without_ext.split('_')
-                if len(parts) >= 5:
-                    level = parts[0]
-                    video_id = parts[1]
-                    frame_number = parts[2]
-                    timestamp = parts[3]
-                    milliseconds = parts[4]
-                    formatted_timestamp = timestamp.replace('-', ':')
-                    title = f"{level}_{video_id} - Frame {frame_number} - {formatted_timestamp}"
-                    duration = formatted_timestamp
-                    vid_info = f"*vid: {level}_{video_id} - {milliseconds}ms"
-                    result = {
-                        "title": title,
-                        "duration": duration,
-                        "vidInfo": vid_info,
-                        "timestamp": formatted_timestamp,
-                        "video_id": f"{level}_{video_id}",
-                        "frame_number": frame_number,
-                        "level": level
-                    }
-                    return result
-                else:
-                    raise ValueError(f"Filename format incorrect: expected 5 parts, got {len(parts)}")
-            except Exception:
-                fallback_result = {
-                    "title": filename.replace('.webp', ''),
-                    "duration": "00:00:00",
-                    "vidInfo": f"*vid: {filename}",
-                    "timestamp": "00:00:00",
-                    "video_id": "unknown",
-                    "frame_number": "0",
-                    "level": "unknown"
-                }
-                return fallback_result
-        DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-        clip_model = CLIPModel.from_pretrained(MODEL_NAME).to(DEVICE)
-        clip_processor = CLIPProcessor.from_pretrained(MODEL_NAME)
-        clip_model.eval()
-        # Load FAISS index và metadata
-        faiss_index = faiss.read_index(FAISS_INDEX_PATH)
-        df_meta = pd.read_csv(METADATA_PATH)
-        image_paths_from_db = df_meta['image_path'].tolist()
+            formatted_timestamp = timestamp.replace('-', ':')
+            title = f"{level}_{video_id} - Frame {frame_number} - {formatted_timestamp}"
+            duration = formatted_timestamp
+            vid_info = f"*vid: {level}_{video_id} - {milliseconds}ms"
+            result = {
+                "title": title,
+                "duration": duration,
+                "vidInfo": vid_info,
+                "timestamp": formatted_timestamp,
+                "video_id": f"{level}_{video_id}",
+                "frame_number": frame_number,
+                "level": level
+            }
+            return result
+        else:
+            raise ValueError(f"Filename format incorrect: expected 5 parts, got {len(parts)}")
     except Exception as e:
-        print(f"❌ Error initializing model or FAISS/metadata: {e}")
+        print(f"❌ Error parsing filename: {e}")
+        return {
+            "title": filename.replace('.webp', ''),
+            "duration": "00:00:00",
+            "vidInfo": f"*vid: {filename}",
+            "timestamp": "00:00:00",
+            "video_id": "unknown",
+            "frame_number": "0",
+            "level": "unknown"
+        }
 
 # --- Encode text ---
 def encode_text(text):
@@ -191,11 +187,17 @@ async def search_frames(request: SearchRequest, top_k: int = 500):
             file_path = os.path.join(FRAME_FOLDER, folder_name, filename)
             # if not os.path.exists(file_path):
             #     continue
-            meta_row = df_meta[df_meta['image_path'] == image_path]
-            # if meta_row.empty:
-            #     continue
-            video_id = meta_row.iloc[0]['video_name'] if 'video_name' in meta_row.columns else ''
-            frame_number = int(meta_row.iloc[0]['frame_number']) if 'frame_number' in meta_row.columns else 0
+            
+            # Sử dụng dictionary lookup thay vì tìm kiếm trong DataFrame
+            if meta_dict and image_path in meta_dict:
+                meta_data = meta_dict[image_path]
+                video_id = meta_data.get('video_name', '')
+                frame_number = int(meta_data.get('frame_number', 0))
+            else:
+                # Fallback nếu không tìm thấy trong dictionary
+                video_id = ''
+                frame_number = 0
+            
             frames.append(FrameData(
                 id=f"frame-search-{i+1}",
                 filename=filename,
@@ -224,7 +226,13 @@ async def get_status():
             "processor_loaded": clip_processor is not None,
             "device": DEVICE,
             "metadata_loaded": df_meta is not None,
-            "metadata_rows": len(df_meta) if df_meta is not None else 0
+            "metadata_rows": len(df_meta) if df_meta is not None else 0,
+            "meta_dict_loaded": meta_dict is not None,
+            "meta_dict_entries": len(meta_dict) if meta_dict is not None else 0,
+            "fps_dict_loaded": fps_dict is not None,
+            "fps_dict_entries": len(fps_dict) if fps_dict is not None else 0,
+            "frames_dict_loaded": frames_dict is not None,
+            "frames_dict_entries": len(frames_dict) if frames_dict is not None else 0
         },
         "elasticsearch": {
             "ocr_index": OCR_INDEX,
@@ -274,6 +282,20 @@ async def get_frame_image(folder: str, filename: str):
     Serve file ảnh frame
     """
     file_path = os.path.join(FRAME_FOLDER, folder, filename)
+    if not os.path.exists(file_path):
+        raise HTTPException(status_code=404, detail="Frame not found")
+    return FileResponse(
+        file_path,
+        media_type="image/webp",
+        headers={"Cache-Control": "max-age=3600"}
+    )
+
+@app.get("/api/frames/image/{image_path:path}")
+async def get_frame_image_by_path(image_path: str):
+    """
+    Serve file ảnh frame bằng image_path (format: folder/filename)
+    """
+    file_path = os.path.join(FRAME_FOLDER, image_path)
     if not os.path.exists(file_path):
         raise HTTPException(status_code=404, detail="Frame not found")
     return FileResponse(
@@ -354,23 +376,28 @@ async def search_frame_id(request: SearchFrameRequest):
             raise HTTPException(status_code=404, detail=f"Không tìm thấy thông tin cho video ID: {yt_id}")
         video_id_metadata = youtube_mapping[yt_id]
         print(f"✅ Found video_id_metadata: {video_id_metadata}")
-        # Tìm fps từ metadata
-        METADATA_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "image_metadata.csv"))
-        import pandas as pd
-        df_meta = pd.read_csv(METADATA_PATH)
-        meta_rows = df_meta[df_meta['video_name'] == video_id_metadata]
-        if meta_rows.empty:
+        # Tìm fps từ fps_dict (tối ưu hóa)
+        if fps_dict is None or frames_dict is None:
+            raise HTTPException(status_code=500, detail="FPS hoặc frames dictionary chưa được khởi tạo")
+        
+        if video_id_metadata not in fps_dict:
             raise HTTPException(status_code=404, detail=f"Không tìm thấy metadata cho video: {video_id_metadata}")
-        fps = float(meta_rows.iloc[0]['fps'])
+        
+        fps = float(fps_dict[video_id_metadata])
         print(f"✅ Found FPS: {fps}")
+        
         # Tính frame_number dựa trên thời gian và fps
         frame_number = int(request.seconds * fps)
         print(f"✅ Calculated frame number: {frame_number} (from {request.seconds}s * {fps}fps)")
-        # Tìm frame gần nhất trong metadata
-        meta_rows['frame_number'] = meta_rows['frame_number'].astype(int)
-        meta_rows['diff'] = (meta_rows['frame_number'] - frame_number).abs()
-        nearest_row = meta_rows.loc[meta_rows['diff'].idxmin()]
-        actual_frame_number = int(nearest_row['frame_number'])
+        
+        # Tìm frame gần nhất trong frames_dict
+        video_frames = frames_dict[video_id_metadata]
+        if not video_frames:
+            raise HTTPException(status_code=404, detail=f"Không tìm thấy frames cho video: {video_id_metadata}")
+        
+        # Tìm frame gần nhất
+        frame_numbers = list(video_frames.keys())
+        actual_frame_number = min(frame_numbers, key=lambda x: abs(x - frame_number))
         actual_seconds = actual_frame_number / fps
         print(f"✅ Nearest frame: {actual_frame_number} (at {actual_seconds:.2f}s)")
         # Trả về kết quả
@@ -398,16 +425,15 @@ async def search_frame_id(request: SearchFrameRequest):
 @app.get("/api/youtube-link")
 async def get_youtube_link(video_id: str, frame_number: int):
     try:
-        # Đọc metadata
-        METADATA_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "image_metadata.csv"))
-        df_meta = pd.read_csv(METADATA_PATH)
+        # Sử dụng fps_dict và frames_dict (tối ưu hóa)
+        if fps_dict is None or frames_dict is None:
+            return {"error": "FPS hoặc frames dictionary chưa được khởi tạo"}
 
         # Kiểm tra metadata cho video_id
-        meta_row = df_meta[df_meta['video_name'] == video_id]
-        if meta_row.empty or 'fps' not in meta_row.columns:
-            return {"error": f"Không tìm thấy metadata hoặc fps cho video_id: {video_id}"}
+        if video_id not in fps_dict:
+            return {"error": f"Không tìm thấy metadata cho video_id: {video_id}"}
 
-        fps = float(meta_row.iloc[0]['fps'])
+        fps = float(fps_dict[video_id])
 
         # Lấy watch_url từ youtube_mapping.csv
         mapping_csv = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "youtube_mapping.csv"))
@@ -428,13 +454,17 @@ async def get_youtube_link(video_id: str, frame_number: int):
         # Build YouTube link with timestamp
         url = f"{watch_url}&t={seconds}s" if "?" in watch_url else f"{watch_url}?t={seconds}s"
 
-        # Tìm frame gần nhất trong metadata
-        meta_row = meta_row.copy()
-        meta_row['frame_number'] = meta_row['frame_number'].astype(int)
-        meta_row['diff'] = (meta_row['frame_number'] - int(frame_number)).abs()
-        nearest_row = meta_row.loc[meta_row['diff'].idxmin()]
-
-        filename_real = os.path.basename(nearest_row['image_path'])
+        # Tìm frame gần nhất trong frames_dict
+        video_frames = frames_dict[video_id]
+        if not video_frames:
+            return {"error": f"Không tìm thấy frames cho video_id: {video_id}"}
+        
+        # Tìm frame gần nhất
+        frame_numbers = list(video_frames.keys())
+        nearest_frame_number = min(frame_numbers, key=lambda x: abs(x - int(frame_number)))
+        image_path = video_frames[nearest_frame_number]
+        
+        filename_real = os.path.basename(image_path)
         folder = video_id
         image_url = f"/api/frames/{folder}/{filename_real}"
 
@@ -465,13 +495,21 @@ async def filter_frames(request: FrameFilterRequest):
         for item in items:
             video_id = item.get("video_id")
             frame_number = item.get("frame_number")
-            # Tìm frame trong df_meta
-            meta_row = df_meta[(df_meta['video_name'] == video_id) & (df_meta['frame_number'] == int(frame_number))]
-            if meta_row.empty:
+            
+            # Tìm frame trong meta_dict thay vì df_meta
+            frame_data = None
+            for image_path, meta_data in meta_dict.items():
+                if (meta_data.get('video_name') == video_id and 
+                    int(meta_data.get('frame_number', 0)) == int(frame_number)):
+                    frame_data = meta_data
+                    break
+            
+            if frame_data is None:
                 continue
-            width = int(meta_row.iloc[0]['width'])
-            height = int(meta_row.iloc[0]['height'])
-            image_path = meta_row.iloc[0]['image_path']
+                
+            width = int(frame_data.get('width', 0))
+            height = int(frame_data.get('height', 0))
+            image_path = frame_data.get('image_path', '')
             # Lấy folder và filename từ image_path
             parts = image_path.split('/')
             if len(parts) == 2:
@@ -512,14 +550,8 @@ es = Elasticsearch(
 )
 
 # --- TẢI DỮ LIỆU METADATA MỘT LẦN KHI ỨNG DỤNG KHỞI ĐỘNG ---
-METADATA_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "image_metadata.csv"))
-try:
-    DF_META = pd.read_csv(METADATA_PATH)
-    DF_META.set_index('image_path', inplace=True)
-    print("Đã tải xong image_metadata.csv vào bộ nhớ.")
-except Exception as e:
-    DF_META = None
-    print(f"❌ Lỗi khi tải image_metadata.csv: {e}")
+# Lưu ý: DF_META đã được thay thế bằng meta_dict để tối ưu hóa hiệu suất
+# meta_dict được tạo ở phần khởi tạo chính của ứng dụng
 
 class OCRSearchRequest(BaseModel):
     text: str
@@ -574,41 +606,26 @@ async def search_ocr(request: OCRSearchRequest):
                 parts = image_path.split('/')
                 if len(parts) == 2:
                     folder, filename = parts
-                    # Ưu tiên lấy metadata từ DF_META
-                    if DF_META is not None:
-                        try:
-                            meta_row = DF_META.loc[image_path]
-                            video_id = meta_row['video_name'] if 'video_name' in meta_row else ""
-                            frame_number = int(meta_row['frame_number']) if 'frame_number' in meta_row else 0
-                            width = int(meta_row['width']) if 'width' in meta_row else 0
-                            height = int(meta_row['height']) if 'height' in meta_row else 0
-                            fps = float(meta_row['fps']) if 'fps' in meta_row else 0.0
-                            # Tính timestamp từ frame_number và fps nếu có
-                            if fps > 0:
-                                seconds = frame_number / fps
-                                timestamp = f"{int(seconds//3600):02d}:{int((seconds%3600)//60):02d}:{int(seconds%60):02d}"
-                                duration = timestamp
-                            else:
-                                timestamp = ""
-                                duration = ""
-                            title = f"{video_id} - Frame {frame_number} - {timestamp}"
-                            vidInfo = f"*vid: {video_id} - {frame_number} frames @ {fps}fps"
-                        except KeyError:
-                            # image_path không có trong metadata, fallback parse filename
-                            parsed = None
-                            try:
-                                parsed = parse_filename(filename)
-                            except Exception:
-                                parsed = None
-                            if parsed:
-                                video_id = parsed.get("video_id", "")
-                                frame_number = int(parsed.get("frame_number", 0))
-                                title = parsed.get("title", "")
-                                duration = parsed.get("duration", "")
-                                vidInfo = parsed.get("vidInfo", "")
-                                timestamp = parsed.get("timestamp", "")
+                    # Ưu tiên lấy metadata từ meta_dict (tối ưu hóa)
+                    if meta_dict and image_path in meta_dict:
+                        meta_data = meta_dict[image_path]
+                        video_id = meta_data.get('video_name', "")
+                        frame_number = int(meta_data.get('frame_number', 0))
+                        width = int(meta_data.get('width', 0))
+                        height = int(meta_data.get('height', 0))
+                        fps = float(meta_data.get('fps', 0.0))
+                        # Tính timestamp từ frame_number và fps nếu có
+                        if fps > 0:
+                            seconds = frame_number / fps
+                            timestamp = f"{int(seconds//3600):02d}:{int((seconds%3600)//60):02d}:{int(seconds%60):02d}"
+                            duration = timestamp
+                        else:
+                            timestamp = ""
+                            duration = ""
+                        title = f"{video_id} - Frame {frame_number} - {timestamp}"
+                        vidInfo = f"*vid: {video_id} - {frame_number} frames @ {fps}fps"
                     else:
-                        # Không có DF_META, fallback parse filename
+                        # Fallback parse filename nếu không tìm thấy trong metadata
                         parsed = None
                         try:
                             parsed = parse_filename(filename)
@@ -650,25 +667,28 @@ async def get_nearest_frame_link(request: NearestFrameRequest):
     Trả về link frame gần nhất với frame_id cho video_id.
     """
     try:
-        # Đọc metadata
-        METADATA_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "image_metadata.csv"))
-        df_meta = pd.read_csv(METADATA_PATH)
+        # Sử dụng frames_dict (tối ưu hóa)
+        if frames_dict is None:
+            raise HTTPException(status_code=500, detail="Frames dictionary chưa được khởi tạo")
 
-        # Lọc các frame thuộc video_id
-        meta_rows = df_meta[df_meta['video_name'] == request.video_id]
-        if meta_rows.empty:
+        # Kiểm tra video_id có trong frames_dict không
+        if request.video_id not in frames_dict:
             raise HTTPException(status_code=404, detail=f"Không tìm thấy metadata cho video_id: {request.video_id}")
 
-        # Tìm frame gần nhất với frame_id
-        meta_rows = meta_rows.copy()
-        meta_rows['frame_number'] = meta_rows['frame_number'].astype(int)
-        meta_rows['diff'] = (meta_rows['frame_number'] - int(request.frame_id)).abs()
-        nearest_row = meta_rows.loc[meta_rows['diff'].idxmin()]
+        # Tìm frame gần nhất với frame_id trong frames_dict
+        video_frames = frames_dict[request.video_id]
+        if not video_frames:
+            raise HTTPException(status_code=404, detail=f"Không tìm thấy frames cho video_id: {request.video_id}")
+        
+        # Tìm frame gần nhất
+        frame_numbers = list(video_frames.keys())
+        nearest_frame_number = min(frame_numbers, key=lambda x: abs(x - int(request.frame_id)))
+        image_path = video_frames[nearest_frame_number]
 
-        filename_real = os.path.basename(nearest_row['image_path'])
+        # Lấy thông tin từ frame gần nhất
+        filename_real = os.path.basename(image_path)
         folder = request.video_id
         image_url = f"/api/frames/{folder}/{filename_real}"
-        nearest_frame_number = int(nearest_row['frame_number'])
 
         return {
             "video_id": request.video_id,
@@ -676,6 +696,8 @@ async def get_nearest_frame_link(request: NearestFrameRequest):
             "nearest_frame_number": nearest_frame_number,
             "image_url": image_url
         }
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 ELASTIC_AUDIO_INDEX = "asr_batch1"
@@ -714,8 +736,7 @@ async def search_audio(request: AudioSearchRequest):
         elif len(parts) == 1:
             return parts[0]
         return 0
-    METADATA_PATH = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "image_metadata.csv"))
-    df_meta = pd.read_csv(METADATA_PATH)
+    # Sử dụng meta_dict đã được khởi tạo thay vì đọc lại CSV
     try:
         res = es.search(index=ELASTIC_AUDIO_INDEX, body=search_query, size=200)
         frames = []
@@ -730,22 +751,38 @@ async def search_audio(request: AudioSearchRequest):
             filename = os.path.basename(video_path)
             video_id = filename.split(".")[0] if filename else ""
             seconds = parse_time_to_seconds(start_time_str)
-            meta_row = df_meta[df_meta['video_name'] == video_id]
-            if meta_row.empty:
+            # Tìm metadata cho video_id bằng cách tìm kiếm trong meta_dict
+            video_metadata = None
+            fps = 25.0  # default fps
+            for image_path, meta_data in meta_dict.items():
+                if meta_data.get('video_name') == video_id:
+                    video_metadata = meta_data
+                    fps = float(meta_data.get('fps', 25.0))
+                    break
+            
+            if video_metadata is None:
                 # Log lỗi hoặc trả về thông báo rõ ràng
                 print(f"Không tìm thấy metadata cho video_id: {video_id}")
                 continue
-            fps = float(meta_row.iloc[0]['fps']) if 'fps' in meta_row.columns and not pd.isnull(meta_row.iloc[0]['fps']) else 25.0
+            
             frame_number = int(seconds * fps)
-            meta_video = df_meta[df_meta['video_name'] == video_id]
-            if not meta_video.empty:
-                meta_video['frame_number'] = meta_video['frame_number'].astype(int)
-                meta_video['diff'] = (meta_video['frame_number'] - frame_number).abs()
-                nearest_row = meta_video.loc[meta_video['diff'].idxmin()]
-                filename_real = os.path.basename(nearest_row['image_path'])
+            
+            # Tìm frame gần nhất bằng cách tìm kiếm trong meta_dict
+            nearest_frame_data = None
+            min_diff = float('inf')
+            for image_path, meta_data in meta_dict.items():
+                if meta_data.get('video_name') == video_id:
+                    frame_num = int(meta_data.get('frame_number', 0))
+                    diff = abs(frame_num - frame_number)
+                    if diff < min_diff:
+                        min_diff = diff
+                        nearest_frame_data = meta_data
+            
+            if nearest_frame_data:
+                filename_real = os.path.basename(nearest_frame_data.get('image_path', ''))
                 folder = video_id
-                width = int(nearest_row['width']) if 'width' in nearest_row else 0
-                height = int(nearest_row['height']) if 'height' in nearest_row else 0
+                width = int(nearest_frame_data.get('width', 0))
+                height = int(nearest_frame_data.get('height', 0))
                 image_url = f"/api/frames/{folder}/{filename_real}"
             else:
                 frame_number_str = str(frame_number).zfill(8)

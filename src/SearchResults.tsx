@@ -24,8 +24,14 @@ interface FrameData {
 }
 
 const ensureLeadingSlash = (p: string) => (p.startsWith('/') ? p : '/' + p);
-const buildImageUrlFromPath = (image_path: string) =>
-  ensureLeadingSlash(`/api/frames/image/${image_path}`);
+const buildImageUrlFromPath = (image_path: string) => {
+  // Nếu image_path đã có format /api/frames/folder/filename thì giữ nguyên
+  if (image_path.startsWith('/api/frames/')) {
+    return image_path;
+  }
+  // Nếu chỉ có filename, tạo URL với format /api/frames/image/filename
+  return ensureLeadingSlash(`/api/frames/image/${image_path}`);
+};
 
 // Thêm 'youtube' vào SearchMode
 type SearchMode = 'random' | 'text'  | 'ocr' | 'audio' | 'youtube'| 'video_frame';
@@ -37,9 +43,16 @@ const SearchResults: React.FC = () => {
       setLoading(true);
       setError(null);
       setSearchStatus('Searching nearest frame...');
-      const url = `${CONFIG.API_BASE_URL}/api/nearest-frame-link?video_id=${encodeURIComponent(videoId)}&frame_id=${frameId}`;
-      const res = await fetch(url);
-      if (!res.ok) throw new Error(`GET /api/nearest-frame-link -> ${res.status}`);
+      const url = `${CONFIG.API_BASE_URL}/api/nearest-frame-link`;
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          video_id: videoId,
+          frame_id: frameId,
+        }),
+      });
+      if (!res.ok) throw new Error(`POST /api/nearest-frame-link -> ${res.status}`);
       const data = await res.json();
 
       // Build frame data
@@ -177,7 +190,7 @@ const SearchResults: React.FC = () => {
       setLoading(true);
       setError(null);
       setSearchStatus('Searching frame by YouTube...');
-      const url = `${CONFIG.API_BASE_URL}/api/search-frame-id`;
+      const url = `${CONFIG.API_BASE_URL}/api/nearest-frame-link`;
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -186,7 +199,7 @@ const SearchResults: React.FC = () => {
           seconds: Number(youtubeSeconds),
         }),
       });
-      if (!res.ok) throw new Error(`POST /api/search-frame-id -> ${res.status}`);
+      if (!res.ok) throw new Error(`POST /api/search-frame-link -> ${res.status}`);
       const data = await res.json();
 
       // Call /api/youtube-link for actual frame
@@ -241,6 +254,7 @@ const SearchResults: React.FC = () => {
       setError(null);
       setSearchStatus('Searching frame by Video ID...');
       const url = `${CONFIG.API_BASE_URL}/api/nearest-frame-link`;
+      console.log('Requesting nearest-frame-link with', {video_id: videoId, frame_id: Number(frameId)});
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -252,50 +266,27 @@ const SearchResults: React.FC = () => {
       if (!res.ok) throw new Error(`POST /api/nearest-frame-link -> ${res.status}`);
       const data = await res.json();
 
-      // Call /api/youtube-link for actual frame
-      const actualLinkRes = await fetch(`${CONFIG.API_BASE_URL}/api/youtube-link?video_id=${videoId}&frame_number=${data.nearest_frame_number}`);
-      const actualLink = actualLinkRes.ok ? await actualLinkRes.json() : {};
-
-      // Call /api/youtube-link for requested frame
-      const requestedLinkRes = await fetch(`${CONFIG.API_BASE_URL}/api/youtube-link?video_id=${data.video_id_metadata}&frame_number=${data.requested_frame_id}`);
-      const requestedLink = requestedLinkRes.ok ? await requestedLinkRes.json() : {};
-
-      const framesRaw = [
-        {
-          id: `yt-${data.video_id}-${data.actual_frame_number}`,
-          filename: `${data.video_id_metadata}_${String(data.actual_frame_number).padStart(8, '0')}.webp`,
-          video_id: data.video_id_metadata,
-          frame_number: data.actual_frame_number,
-          image_url: actualLink.image_url ?? `/api/frames/${data.video_id_metadata}/${String(data.actual_frame_number).padStart(8, '0')}.webp`,
-          title: `YouTube @ ${data.actual_seconds}s (nearest)`,
-          fps: data.fps,
-          timestamp: String(data.actual_seconds),
-          youtube_url: actualLink.youtube_url ?? '',
-        },
-        {
-          id: `yt-${data.video_id}-${data.requested_frame_number}`,
-          filename: `${data.video_id_metadata}_${String(data.requested_frame_number).padStart(8, '0')}.webp`,
-          video_id: data.video_id_metadata,
-          frame_number: data.requested_frame_number,
-          image_url: requestedLink.image_url ?? `/api/frames/${data.video_id_metadata}/${String(data.requested_frame_number).padStart(8, '0')}.webp`,
-          title: `YouTube @ ${data.requested_seconds}s (requested)`,
-          fps: data.fps,
-          timestamp: String(data.requested_seconds),
-          youtube_url: requestedLink.youtube_url ?? '',
-        }
-      ];
-      console.log(framesRaw)
-      const normalized = normalizeToFrameData(framesRaw);
-      setFrames(normalized);
-      setAllFrames(normalized);
-      setSearchStatus(`Found actual frame at ${data.actual_seconds}s, requested frame at ${data.requested_seconds}s`);
+      // Build frame data từ response của /api/nearest-frame-link
+      const frame: FrameData = {
+        id: `nearest-${data.video_id}-${data.nearest_frame_number}`,
+        filename: `${data.video_id}_${String(data.nearest_frame_number).padStart(8, '0')}.webp`,
+        video_id: data.video_id,
+        frame_number: data.nearest_frame_number,
+        image_url: data.image_url ?? `/api/frames/${data.video_id}/${String(data.nearest_frame_number).padStart(8, '0')}.webp`,
+        title: `Nearest frame to ${data.requested_frame_id}`,
+        timestamp: String(data.nearest_frame_number),
+      };
+      
+      setFrames([frame]);
+      setAllFrames([frame]);
+      setSearchStatus(`Found nearest frame: #${data.nearest_frame_number} for requested #${data.requested_frame_id}`);
     } catch (e) {
-      setError(e instanceof Error ? e.message : 'Failed to search frame by YouTube');
-      setSearchStatus('YouTube search failed.');
+      setError(e instanceof Error ? e.message : 'Failed to search frame by Video ID');
+      setSearchStatus('Video ID search failed.');
     } finally {
       setLoading(false);
     }
-  }, [youtubeUrl, youtubeSeconds]);
+  }, [videoId, frameId]);
 
   // Audio/ASR → làm giống OCR (POST text, nhận JSON, normalize, setFrames...)
   const searchByAudio = useCallback(async (text: string) => {
