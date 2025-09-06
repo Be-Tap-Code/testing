@@ -20,13 +20,15 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
 logging.getLogger("uvicorn.access").disabled = True
 
 os.environ["KMP_DUPLICATE_LIB_OK"] = "TRUE"
+# Set PyTorch CUDA memory allocation configuration to avoid fragmentation
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 # Thiết lập cache cho HuggingFace về /data/cndt_hangdv/AIC
 os.environ["HF_HOME"] = "/data/cndt_hangdv/AIC"
 os.environ["TRANSFORMERS_CACHE"] = "/data/cndt_hangdv/AIC/huggingface_cache"
 os.environ["HF_DATASETS_CACHE"] = "/data/cndt_hangdv/AIC/huggingface_datasets"
 os.environ["HF_METRICS_CACHE"] = "/data/cndt_hangdv/AIC/huggingface_metrics"
 # Force using GPU 5 (which has more free memory)
-os.environ["CUDA_VISIBLE_DEVICES"] = "7"
+os.environ["CUDA_VISIBLE_DEVICES"] = "5"
 clip_model = None
 clip_processor = None
 milvus_client = None
@@ -54,9 +56,20 @@ try:
     import torch
     from transformers import CLIPProcessor, CLIPModel
     DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    
+    # Clear CUDA cache before loading model
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        print(f"✅ Using GPU: {torch.cuda.get_device_name()}")
+        print(f"✅ GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB")
+    
     clip_model = CLIPModel.from_pretrained(MODEL_NAME).to(DEVICE)
     clip_processor = CLIPProcessor.from_pretrained(MODEL_NAME)
     clip_model.eval()
+    
+    # Clear cache after model loading
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
     faiss_index = faiss.read_index(FAISS_INDEX_PATH)
     df_meta = pd.read_csv(METADATA_PATH)
     image_paths_from_db = df_meta['image_path'].tolist()
@@ -154,13 +167,24 @@ def encode_text(text):
     if clip_model is None or clip_processor is None or DEVICE is None:
         raise RuntimeError("CLIP model or processor not loaded.")
     import torch
+    
+    # Clear CUDA cache before processing
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
     inputs = clip_processor(text=text, return_tensors="pt").to(DEVICE)
     with torch.no_grad():
         text_features = clip_model.get_text_features(
             input_ids=inputs.input_ids, attention_mask=inputs.attention_mask
         )
     text_features /= text_features.norm(dim=-1, keepdim=True)
-    return text_features.cpu().squeeze().numpy().reshape(1, -1)
+    
+    # Move to CPU and clear GPU memory
+    result = text_features.cpu().squeeze().numpy().reshape(1, -1)
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+    
+    return result
 
 # --- Search endpoint ---
 class SearchRequest(BaseModel):

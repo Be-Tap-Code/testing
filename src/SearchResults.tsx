@@ -190,7 +190,7 @@ const SearchResults: React.FC = () => {
       setLoading(true);
       setError(null);
       setSearchStatus('Searching frame by YouTube...');
-      const url = `${CONFIG.API_BASE_URL}/api/nearest-frame-link`;
+      const url = `${CONFIG.API_BASE_URL}/api/search-frame-id`;
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -199,7 +199,7 @@ const SearchResults: React.FC = () => {
           seconds: Number(youtubeSeconds),
         }),
       });
-      if (!res.ok) throw new Error(`POST /api/search-frame-link -> ${res.status}`);
+      if (!res.ok) throw new Error(`POST /api/search-frame-id -> ${res.status}`);
       const data = await res.json();
 
       // Call /api/youtube-link for actual frame
@@ -223,14 +223,14 @@ const SearchResults: React.FC = () => {
           youtube_url: actualLink.youtube_url ?? '',
         },
         {
-          id: `yt-${data.video_id}-${data.requested_frame_number}`,
-          filename: `${data.video_id_metadata}_${String(data.requested_frame_number).padStart(8, '0')}.webp`,
+          id: `yt-${data.video_id}-${data.actual_frame_number}`,
+          filename: `${data.video_id_metadata}_${String(data.actual_frame_number).padStart(8, '0')}.webp`,
           video_id: data.video_id_metadata,
-          frame_number: data.requested_frame_number,
-          image_url: requestedLink.image_url ?? `/api/frames/${data.video_id_metadata}/${String(data.requested_frame_number).padStart(8, '0')}.webp`,
-          title: `YouTube @ ${data.requested_seconds}s (requested)`,
+          frame_number: data.actual_frame_number,
+          image_url: actualLink.image_url ?? `/api/frames/${data.video_id_metadata}/${String(data.actual_frame_number).padStart(8, '0')}.webp`,
+          title: `YouTube @ ${data.actual_seconds}s (requested)`,
           fps: data.fps,
-          timestamp: String(data.requested_seconds),
+          timestamp: String(data.actual_seconds),
           youtube_url: requestedLink.youtube_url ?? '',
         }
       ];
@@ -238,7 +238,7 @@ const SearchResults: React.FC = () => {
       const normalized = normalizeToFrameData(framesRaw);
       setFrames(normalized);
       setAllFrames(normalized);
-      setSearchStatus(`Found actual frame at ${data.actual_seconds}s, requested frame at ${data.requested_seconds}s`);
+      setSearchStatus(`Found actual frame at ${data.actual_seconds}s, requested frame at ${data.requested_frame_number}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to search frame by YouTube');
       setSearchStatus('YouTube search failed.');
